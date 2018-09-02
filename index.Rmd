@@ -1,0 +1,189 @@
+---
+title: "Prediction excerise for dummbell use"
+author: "Bert Schwenk"
+date: "2 september 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadinglibraries, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+```
+## Introduction
+
+The purpose of this assignment is to predict the correct execution of a dumbell lifting excercise.
+  
+For this assignment data was used from [Weight Lifting Exercises Dataset](http://groupware.les.inf.puc-rio.br/har "Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013 Read more: http://groupware.les.inf.puc-rio.br/har#ixzz5Pk2hMc4k"). The dataset is licensed under the Creative Commons license (CC BY-SA). It contains the following information: "Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E)." [(Velloso, et al., 2013)](http://groupware.les.inf.puc-rio.br/har "Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013 Read more: http://groupware.les.inf.puc-rio.br/har#ixzz5Pk2hMc4k") 
+ 
+Class A in the dataset corresponds to the correct excecution of the excercise. Classes B until E are incorrect performed excercise executions. This document contains the following sections:
+1. Exporatory analysis
+2. Data Cleaning
+3. Model building 
+4. Model testing
+5. Prediction for assignment
+6. Conclusion
+  
+## Exploratory Analysis
+I first load the training/testingsets.
+```{r dataloading, cache=TRUE}
+ training<-read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+ testing<-read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+  
+I start the analysis by looking at the structure and exploring patterns in the data (str/summary/View/table commands).
+The dataset contains in total 160 variables, which contains various movement details (e.g. pitch, roll, yaw on belt, arm, dumbell and gloves of the weightlifter), time intervaldata and time groupingdata in num_window and new_window variables. The "classe" variable holds the category how well the excercise was performed. In the testingset this last variable is missing. It is therefore not a real testset, in the sense that it can be used for crossvalidation. It is only used for prediction. I will create a 2nd 'real' testset for crossvalidation as part of the trainingset. More in the model building section on this.
+  
+Next, I looked into how to use the source data. It contains multiple movements per lift as the data gathered when lifting. There is not a clear cut marker in the data, that divides one dumbbell lift from the other. One weightlifter lifts 10 times correctly. The new_window/num_window variables are just markers that divide the data into 'x' time passed. I choose to not take the window markers into account.
+
+```{r timeseriesexplore}
+table(training$classe[training$new_window=="yes"],training$user_name[training$new_window=="yes"])
+```
+
+Furthermore, there are many variables that have a lot of NA's. This would make prediction of the class in the testset impossible. The counter variable and time variables are left out as these do not have any relationship when applying the model to a new situation. Before I do preprocessing, I first concatenate the training and testset to ensure similar preprocessing. After preprocessing these will be split again for modelling.      
+```{r reformatTestingsetToMatchTrainingset}
+  testingNew<-testing
+  testingNew$classe<-"A" #assign dummy classe (not used at all)
+  testingNew<-select(testingNew,-problem_id) #not select problem_id only in testset
+  nrow(training)
+  nrow(testingNew)
+```
+
+```{r filterontest}
+  trainingFiltered <- rbind(training,testingNew)
+  trainingFiltered <- select(trainingFiltered, classe, user_name,8:159) #do not select timevars/counts
+```
+
+##Data cleaning##
+1 skewness_roll_belt.1 variable is named wrong. This is corrected to skewness_pitch_belt.  
+2 All factor variables are in reality numeric. This is probably because the #DIV/X values. Convert toclass numeric.  
+3 check 'summary(training)' gave insights into which variables are almost not filled or have invalid features. This was explored further with a nearZeroVar analysis, to remove variables that have almost no variance and would have too little predictive power. 
+
+```{r datapreparation, warning=FALSE}
+trainingPrep <- rename(trainingFiltered, skewness_pitch_belt = skewness_roll_belt.1)  # 1) change variable name
+
+trainingPrep[sapply(trainingPrep, is.factor)][,-1]<-lapply(trainingPrep[sapply(trainingPrep, is.factor)][,-1], as.character) #2)convert all factors (except classe) to numeric (DIV/0 will be NA). (first to character and then to factor)
+trainingPrep[sapply(trainingPrep, is.character)][,-1]<-lapply(trainingPrep[sapply(trainingPrep, is.character)][,-1], as.numeric)
+
+trainingPrep <- trainingPrep[,nearZeroVar(trainingPrep[1:19622,],saveMetrics = TRUE)$nzv=="FALSE"] # 3) remove variables with low variance.
+```
+
+Now we look at the NA values. Analysis showed that there are many variables with NA values (see below). Because for below variables there is almost 100% missing, I will remove these variables for model building. These would not have much predictive power in model building / nor would it help with prediction of classes in the testset.  
+```{r datapreparation_na_check}
+ variables_with_NA <- sapply(trainingPrep, function(x) sum(is.na(x)))[1:length(trainingPrep)][sapply(trainingPrep, function(x) sum(is.na(x)))[1:length(trainingPrep)]>0]
+head(variables_with_NA) #show firstones
+```
+
+```{r NAValueRemoval, warning=FALSE}
+trainingPrep<-select(trainingPrep, -c(names(variables_with_NA[variables_with_NA>60]))) #remove variable where too many NA's (more than 60 NAs)
+
+#replace na's with median value. 
+na_variables <- names(trainingPrep[,sapply(trainingPrep, function(x) sum(is.na(x)))[1:length(trainingPrep)]>0]) #get NA variables
+if(length(na_variables)>0){
+  for(i in 1:length(na_variables))
+  {
+     na_matrix <- is.na(trainingPrep[,names(trainingPrep)==na_variables[i]]) #get na/non-na value matrix 
+     trainingPrep[na_matrix==TRUE,names(trainingPrep)==na_variables[i]] <-     median(trainingPrep[na_matrix==FALSE,names(trainingPrep)==na_variables[i]]) #get median of values and impute NA values 
+  }
+}
+```
+
+Split the testset again from the trainingset before model building. This way training and prediction on test data remain separate. The data in testset remains untouched/unchanged, except for the same preprocessing as trainingset.  
+```{r splittestset}
+testingPrep<-trainingPrep[(nrow(trainingPrep)-19):nrow(trainingPrep),-1] #split unchanged but preproc. testset
+trainingPrep<-trainingPrep[1:(nrow(trainingPrep)-20),]
+```
+
+## Model creation
+The data is clean enough to do model building. Because the provided testset, doesn't contain any 'classe' variable to check if the results are correct, I split the trainingset again into two parts: realTraining (60%) and realTest (40%). Random subsample without replacement. This way checking of the out of sample errors after model building and cross validation is possible. The assignment 'test set' will only be used for prediction. After dividing the result shows the variance of classes remains the same (see below for the  before/after-fractions). 
+```{r crossvalidation}
+set.seed(1234) #random split but with steady results
+inTrain <- createDataPartition(y=trainingPrep$classe,p=0.60, list=FALSE) 
+realTrain <- trainingPrep[inTrain,]
+realTest <- trainingPrep[-inTrain,]
+prop.table(table(trainingPrep$classe)) #check of proportions of classes are good
+prop.table(table(realTrain$classe))
+
+
+```
+
+I start with random forests, which gives in general good results and incorporates additional crossvalidation by folding the trainingdata and select the best model out of many tries. Because this is a classification problem into classes, this would also probably work better with a treemodel than a linear model. I would like to have used all the trainingdata, unfortunatly my pc cannot handle the whole dataset (too little memory). I split off a smaller set.  
+```{r selectsmallSet, cache=TRUE}
+set.seed(123456)
+inTrain <- createDataPartition(y=realTrain$classe,p=0.06, list=FALSE) 
+realTrain1 <- realTrain[inTrain,]
+nrow(realTrain1)
+```
+
+```{r modelbuildingRF1, cache=TRUE}
+modelRF <- train(classe~.,data=realTrain1,method="rf", prox=TRUE)
+modelRF$finalModel
+```
+Random forests delivered an error rate of 13.7%. This is ok, but can we improve? Some variables contribute little to the model and could be removed to get better overall performance. 
+```{r variableselection, warning=FALSE}
+importance<-varImp(modelRF, numTrees=5)
+importance_Matrix<-importance[1]$importance$Overall<1 #only important enough variables
+names(realTrain[,importance_Matrix])
+```
+The above test shows that username, pitch_belt and yaw_belt only have little predictive value. I remove these. Then I get a new random sample.
+```{r reduceVarsAndSelectData, warning=FALSE, cache=TRUE}
+set.seed(1453)
+inTrain <- createDataPartition(y=realTrain$classe,p=0.20, list=FALSE) 
+realTrain2 <- realTrain[inTrain,]
+nrow(realTrain2)
+
+realTrain2<-select(realTrain2,-c("user_name","pitch_belt","yaw_belt"))  
+```
+I use much more data this time with another random sample from the trainingdata. The traincontrol is also adjusted, to get a balance between more data and memory issues on my pc. I chose 3 cycles + smaller trainingpart in favor of bigger testpart. This resulted in a excellent in sample error rate (5,73%) (see below).  
+```{r modelbuildingRF1_2, cache=TRUE}
+train.control<-trainControl(method="cv",number=3,p=0.5, repeats=1)
+modelRF2 <- train(classe~.,data=realTrain2,method="rf", prox=TRUE, trainControl=train.control)
+modelRF2$finalModel
+```
+
+After random forests also boosting is tried, to compare the random forrest result (check is random forest is overfitting). I use the full set of variables here on new sample of trainingdata. 
+```{r modelbuildingBoosting, warning=FALSE, cache=TRUE}
+set.seed(123)
+inTrain <- createDataPartition(y=realTrain$classe,p=0.12, list=FALSE) 
+realTrain3 <- realTrain[inTrain,]
+nrow(realTrain3)
+
+modelBoosting <- train(classe~.,data=realTrain3, method="gbm", verbose=FALSE) 
+modelBoosting$results
+```
+
+The boosting model, got a reasonable result. 0,87% accuracy. This result is comparable with random forrest. 
+As the in accuracy / 'in sample error rates' look quite good for both models, I will move on to model testing.
+
+
+## Model testing
+Below the random forest and boosting models are used to predict the testset and check the out of sample errorrate.
+```{r prediction}
+realTestSmall<-select(realTest,-c("user_name","pitch_belt","yaw_belt")) #apply the same selection as on trainingset
+predictionRF2 <- predict(modelRF2,realTestSmall)
+confusionMatrix(predictionRF2,realTestSmall$classe)
+```
+The accuracy of the random forrest model is very good, with 0,947. Also Sensitivity, Specificity and other measures look good. 
+
+I also checked the Boosting model for out of sample error and prediction value. This is also good with marks in the 90% accuracy. I choose however the random forrest model as the accuracy is a bit higher. 
+```{r modelverification}
+predictionBoosting <- predict(modelBoosting,realTest) 
+confusionMatrix(predictionBoosting,realTest$classe)
+```
+
+
+## Predict testset for assignment
+For the Coursera assignment we use the provided testset to predict the class. First we do the same preprocessing steps to the testset.
+```{r prediction_testset}
+testingPrepSmall<-select(testingPrep,-c("user_name","pitch_belt","yaw_belt")) #apply the same selection as on trainingset
+predictionAssignment <- predict(modelRF2,testingPrepSmall) #I left the answers out, because I am not sure it should be included in the peerreview :-S
+```
+
+## Conclusion
+The type of dumbbell lift can be predicted with 95% accuracy based on position/movement-measurements with a random forest model.  
+
+
+
